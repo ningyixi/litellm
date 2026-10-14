@@ -34,6 +34,9 @@ class PublicDispatch(Generic[RequestT]):
     bypass: Callable[[RequestT], bool] | None = None
 
     def _requires_projection(self, rules: Rules) -> bool:
+        pin: Final = runtime.pinned_decision(self.route)
+        if pin is not None:
+            return pin is not Decision.PYTHON
         for rule in rules:
             if not isinstance(rule, RouteRule) or rule.route is not self.route:
                 continue

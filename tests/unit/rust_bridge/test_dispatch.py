@@ -4,10 +4,10 @@ from typing import Final, TypeAlias
 
 import pytest
 
-from litellm.rust_bridge import configuration
+from litellm.rust_bridge import configuration, runtime
 from litellm.rust_bridge.bindings import NativeBinding
 from litellm.rust_bridge.catalog import Route, RouteContext, RouteRule, Rules
-from litellm.rust_bridge.configuration import Rollout
+from litellm.rust_bridge.configuration import Decision, Rollout
 from litellm.rust_bridge.dispatch import PublicDispatch
 from litellm.rust_bridge.runtime import NO_PYTHON, NoPythonImplementationError
 
@@ -21,6 +21,32 @@ def binding() -> NativeBinding[object]:
     bound: Final[NativeBinding[object]] = NativeBinding("unused", validate=lambda value: value)
     bound.override(None)
     return bound
+
+
+def test_rust_required_pin_projects_a_python_only_rule() -> None:
+    request: Final = Request(model="pinned-model")
+    dispatch: Final = PublicDispatch(
+        route=Route.MESSAGES,
+        request=lambda args, kwargs: request,
+        context=lambda value: RouteContext(Route.MESSAGES),
+    )
+    native_binding: Final[NativeBinding[NativeRoute]] = NativeBinding("messages", validate=lambda _: None)
+    native_binding.override(lambda value, args, kwargs: value.model)
+
+    def reject_python(*args: object, **kwargs: object) -> object:
+        pytest.fail("A required native pin must not call Python")
+
+    with runtime.pinned(Decision.RUST_REQUIRED, Route.MESSAGES):
+        result: Final = dispatch.run(
+            (),
+            {},
+            python=reject_python,
+            binding=native_binding,
+            native=lambda hook, value, args, kwargs: hook(value, args, kwargs),
+            rules=(RouteRule(Route.MESSAGES, Rollout.PYTHON_ONLY),),
+        )
+
+    assert result == request.model
 
 
 @pytest.mark.parametrize("rules", ((), (RouteRule(Route.MESSAGES, Rollout.RUST_REQUIRED),)))

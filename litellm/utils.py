@@ -92,8 +92,8 @@ from litellm.litellm_core_utils.fallback_generalizations import (
 )
 from litellm.litellm_core_utils.sensitive_data_masker import redact_credentials_in_payload
 from litellm.litellm_core_utils.tokenizer import strip_special_tokens
+from litellm.rust_bridge import runtime
 from litellm.rust_bridge import tokenizer as tokenizer_dispatch
-from litellm.rust_bridge.catalog import decision
 from litellm.rust_bridge.configuration import Decision
 
 _CachingHandlerResponse = None
@@ -2411,9 +2411,9 @@ _select_tokenizer = select_tokenizer
 def _huggingface_tokenizer_backend() -> Decision:
     """The backend `tokenizer_dispatch.from_str` / `from_pretrained` will select right now.
 
-    Cached HuggingFace tokenizers are keyed on it, so flipping `LITELLM_RUST` or
-    `litellm.rust(...)` reaches a fresh object instead of the other backend's."""
-    return decision(tokenizer_dispatch.HUGGINGFACE_CONTEXT)
+    Cached HuggingFace tokenizers are keyed on it, so `LITELLM_RUST`, `litellm.rust(...)` and
+    `runtime.pinned(...)` reach a fresh object instead of the other backend's."""
+    return runtime.selected_decision(tokenizer_dispatch.HUGGINGFACE_CONTEXT)
 
 
 @lru_cache(maxsize=DEFAULT_MAX_LRU_CACHE_SIZE)

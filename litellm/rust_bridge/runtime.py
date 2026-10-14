@@ -1,19 +1,26 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Generator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final, Generic, NoReturn, TypeAlias, TypeVar
 
 from typing_extensions import assert_never
 
 from litellm.exceptions import APIError
 from litellm.rust_bridge.bindings import NativeBinding, native_upstream_error
-from litellm.rust_bridge.catalog import RouteContext, Rules, decision
+from litellm.rust_bridge.catalog import Route, RouteContext, Rules, decision
 from litellm.rust_bridge.configuration import Decision
 from litellm.rust_bridge.response_metadata import mark_rust_response
 
 NativeT = TypeVar("NativeT")
 ResultT = TypeVar("ResultT")
+
+_PINNED: Final[ContextVar[Mapping[Route, Decision]]] = ContextVar(
+    "rust_bridge_pinned_routes", default=MappingProxyType({})
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +55,24 @@ class NoPythonImplementationError(RuntimeError):
     pass
 
 
+@contextmanager
+def pinned(decision: Decision, *routes: Route) -> Generator[None, None, None]:
+    token: Final = _PINNED.set(MappingProxyType({**_PINNED.get(), **dict.fromkeys(routes, decision)}))
+    try:
+        yield
+    finally:
+        _PINNED.reset(token)
+
+
+def pinned_decision(route: Route) -> Decision | None:
+    return _PINNED.get().get(route)
+
+
+def selected_decision(context: RouteContext, rules: Rules | None = None) -> Decision:
+    pin: Final = pinned_decision(context.route)
+    return decision(context, rules) if pin is None else pin
+
+
 def run(
     context: RouteContext,
     *,
@@ -56,7 +81,7 @@ def run(
     python: Callable[[], ResultT] | NoPythonImplementation,
     rules: Rules | None = None,
 ) -> ResultT:
-    selected: Final = decision(context, rules)
+    selected: Final = selected_decision(context, rules)
     if isinstance(python, NoPythonImplementation):
         _require_rust(context, selected)
         return _required(_attempt_native(context, binding, native), context)
@@ -80,7 +105,7 @@ async def arun(
     python: Callable[[], Awaitable[ResultT]] | NoPythonImplementation,
     rules: Rules | None = None,
 ) -> ResultT:
-    selected: Final = decision(context, rules)
+    selected: Final = selected_decision(context, rules)
     if isinstance(python, NoPythonImplementation):
         _require_rust(context, selected)
         return _required(await _aattempt_native(context, binding, native), context)

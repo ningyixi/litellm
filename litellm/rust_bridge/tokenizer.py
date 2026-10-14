@@ -28,7 +28,7 @@ def _as_factory(value: object) -> type[NativeTokenizer] | None:
 TOKENIZER: Final = NativeBinding("Tokenizer", validate=_as_factory)
 
 # The catalog contexts the tokenizer factories dispatch on. Callers that cache a tokenizer per
-# backend key their cache on `decision(...)` of the same context, so key and dispatch agree.
+# backend key their cache on `runtime.selected_decision(...)` of the same context, so key and dispatch agree.
 TIKTOKEN_CONTEXT: Final = RouteContext(Route.TOKENIZER, provider="tiktoken")
 HUGGINGFACE_CONTEXT: Final = RouteContext(Route.TOKENIZER, provider="huggingface")
 

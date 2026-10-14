@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Generator
 from types import SimpleNamespace
 from typing import Final, Protocol
@@ -11,7 +12,7 @@ from litellm.llms.base_llm.ocr.transformation import OCRResponse
 from litellm.router_utils.add_retry_fallback_headers import get_hidden_params_dict
 from litellm.rust_bridge import bindings, configuration, runtime
 from litellm.rust_bridge.catalog import Route, RouteContext, RouteRule
-from litellm.rust_bridge.configuration import Rollout
+from litellm.rust_bridge.configuration import Decision, Rollout
 from litellm.rust_bridge.lifecycle import Complete, Open, Yield
 from litellm.rust_bridge.streams import Stream, SyncStream
 
@@ -79,6 +80,92 @@ def run(rollout: Rollout, calls: Recorder, *, native_missing: bool = False, cont
         python=calls.python,
         rules=rules(rollout),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", (False, True), ids=("sync", "async"))
+async def test_rust_required_pin_overrides_python_only_rules(asynchronous: bool) -> None:
+    calls: Final = recorder()
+
+    async def native(fn: NativeFn) -> str:
+        return fn()
+
+    async def python() -> str:
+        return calls.python()
+
+    with runtime.pinned(Decision.RUST_REQUIRED, Route.MESSAGES):
+        result: Final = (
+            await runtime.arun(
+                CONTEXT,
+                binding=binding(calls.rust),
+                native=native,
+                python=python,
+                rules=rules(Rollout.PYTHON_ONLY),
+            )
+            if asynchronous
+            else run(Rollout.PYTHON_ONLY, calls)
+        )
+
+    assert result == RUST
+    assert calls.calls == (RUST,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", (False, True), ids=("sync", "async"))
+async def test_python_pin_overrides_rust_required_rules(asynchronous: bool) -> None:
+    calls: Final = recorder()
+
+    async def native(fn: NativeFn) -> str:
+        return fn()
+
+    async def python() -> str:
+        return calls.python()
+
+    with runtime.pinned(Decision.PYTHON, Route.MESSAGES):
+        result: Final = (
+            await runtime.arun(
+                CONTEXT,
+                binding=binding(calls.rust),
+                native=native,
+                python=python,
+                rules=rules(Rollout.RUST_REQUIRED),
+            )
+            if asynchronous
+            else run(Rollout.RUST_REQUIRED, calls)
+        )
+
+    assert result == PYTHON
+    assert calls.calls == (PYTHON,)
+
+
+def test_pin_only_applies_inside_its_context() -> None:
+    calls: Final = recorder()
+
+    with runtime.pinned(Decision.PYTHON, Route.MESSAGES):
+        assert run(Rollout.RUST_REQUIRED, calls) == PYTHON
+
+    assert run(Rollout.RUST_REQUIRED, calls) == RUST
+    assert calls.calls == (PYTHON, RUST)
+
+
+def test_pin_for_another_route_does_not_change_dispatch() -> None:
+    calls: Final = recorder()
+
+    with runtime.pinned(Decision.RUST_REQUIRED, Route.OCR):
+        assert run(Rollout.PYTHON_ONLY, calls) == PYTHON
+
+    assert calls.calls == (PYTHON,)
+
+
+@pytest.mark.asyncio
+async def test_pin_is_propagated_to_asyncio_to_thread() -> None:
+    calls: Final = recorder()
+
+    with runtime.pinned(Decision.RUST_REQUIRED, Route.MESSAGES):
+        result: Final = await asyncio.to_thread(run, Rollout.PYTHON_ONLY, calls)
+
+    assert result == RUST
+    assert calls.calls == (RUST,)
 
 
 @pytest.mark.parametrize(
