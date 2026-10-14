@@ -20,7 +20,7 @@ from litellm.proxy.utils import InternalUsageCache
 from litellm.router_utils.add_retry_fallback_headers import get_hidden_params_dict
 from litellm.rust_bridge import runtime
 from litellm.rust_bridge.catalog import Route, RouteContext, RouteRule
-from litellm.rust_bridge.configuration import Rollout
+from litellm.rust_bridge.configuration import Decision, Rollout
 from litellm.rust_bridge.public_call import NativeCall
 from litellm.types.caching import CachingSupportedCallTypes
 from tests.test_litellm_rust.messages.data import MESSAGES, MESSAGES_EVENTS, MESSAGES_MODEL, MESSAGES_RESPONSE
@@ -50,10 +50,8 @@ async def test_cache_hit_keeps_model_budget_spend_but_accounts_for_usage(
     route: Literal["chat", "messages", "responses"],
     stream: bool,
     native: bool,
-    monkeypatch: pytest.MonkeyPatch,
     legacy: bool,
 ) -> None:
-    monkeypatch.setenv("LITELLM_RUST", "1" if native else "0")
     litellm.cache = Cache() if legacy else _v2.Cache.memory()
     counters: Final = litellm.DualCache()
     budget: Final = PROXY_VirtualKeyModelMaxBudgetLimiter(counters)
@@ -118,11 +116,9 @@ async def test_cache_hit_keeps_model_budget_spend_but_accounts_for_usage(
 async def test_response_cache_backend_does_not_control_coordination(
     recording_server: RecordingServer,
     native: bool,
-    monkeypatch: pytest.MonkeyPatch,
     backend: Literal["disabled", "memory", "redis"],
     redis_url: str,
 ) -> None:
-    monkeypatch.setenv("LITELLM_RUST", "1" if native else "0")
     litellm.cache = (
         None
         if backend == "disabled"
@@ -227,35 +223,34 @@ async def test_v2_messages_replays_a_completed_stream(recording_server: Recordin
         "stream": True,
         "callbacks": [recorder],
     }
-    first_stream: Final = await litellm.anthropic_messages(**parameters)
-    assert cache_key(first_stream) is None
-    first: Final = await collect(first_stream)
-    await recorder.wait_for_async("async_log_success_event")
-    second_stream: Final = await litellm.anthropic_messages(**parameters)
-    assert isinstance(cache_key(second_stream), str)
-    assert cache_key(second_stream) == get_hidden_params_dict(second_stream)["cache_key"]
-    second: Final = await collect(second_stream)
-    assert payload(first) == payload(second)
-    assert first == b"".join(recording_server.default_response.payloads())
-    assert len(recording_server.requests) == 1
-    await drain_logging()
-    successes: Final = await recorder.wait_for_async("async_log_success_event", count=2)
-    cached_log: Final = TypeAdapter(dict[str, object]).validate_python(successes[-1].kwargs)
-    assert cached_log["cache_hit"] is True
-    assert cached_log["response_cost"] == 0
+    with runtime.pinned(Decision.RUST_REQUIRED, Route.MESSAGES):
+        first_stream: Final = await litellm.anthropic_messages(**parameters)
+        assert cache_key(first_stream) is None
+        first: Final = await collect(first_stream)
+        await recorder.wait_for_async("async_log_success_event")
+        second_stream: Final = await litellm.anthropic_messages(**parameters)
+        assert isinstance(cache_key(second_stream), str)
+        assert cache_key(second_stream) == get_hidden_params_dict(second_stream)["cache_key"]
+        second: Final = await collect(second_stream)
+        assert payload(first) == payload(second)
+        assert first == b"".join(recording_server.default_response.payloads())
+        assert len(recording_server.requests) == 1
+        await drain_logging()
+        successes: Final = await recorder.wait_for_async("async_log_success_event", count=2)
+        cached_log: Final = TypeAdapter(dict[str, object]).validate_python(successes[-1].kwargs)
+        assert cached_log["cache_hit"] is True
+        assert cached_log["response_cost"] == 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "redis"))
 async def test_rust_messages_uses_a_legacy_cache_without_python_inference(
     recording_server: RecordingServer,
-    monkeypatch: pytest.MonkeyPatch,
     backend: Literal["memory", "redis"],
     redis_url: str,
 ) -> None:
     from litellm.caching.caching import Cache
 
-    monkeypatch.setenv("LITELLM_RUST", "1")
     litellm.cache = Cache() if backend == "memory" else Cache(type="redis", url=redis_url, namespace="rust-host")
     logger: Final = RecordingLogger()
     litellm.callbacks = [logger]
@@ -286,12 +281,10 @@ async def test_rust_messages_uses_a_legacy_cache_without_python_inference(
 @pytest.mark.parametrize("excluded", (None, [], ["embedding"]))
 async def test_v2_cache_honors_supported_call_types_for_reads_and_writes(
     recording_server: RecordingServer,
-    monkeypatch: pytest.MonkeyPatch,
     route: Literal["chat", "messages", "responses"],
     native: bool,
     excluded: list[CachingSupportedCallTypes] | None,
 ) -> None:
-    monkeypatch.setenv("LITELLM_RUST", "1" if native else "0")
     litellm.cache = _v2.Cache.memory()
     call_type: Final[CachingSupportedCallTypes] = (
         "acompletion" if route == "chat" else "anthropic_messages" if route == "messages" else "aresponses"
@@ -319,12 +312,10 @@ async def test_v2_cache_honors_supported_call_types_for_reads_and_writes(
 )
 async def test_v2_default_off_requires_opt_in_even_for_existing_entries(
     recording_server: RecordingServer,
-    monkeypatch: pytest.MonkeyPatch,
     route: Literal["chat", "messages", "responses"],
     native: bool,
     legacy: bool,
 ) -> None:
-    monkeypatch.setenv("LITELLM_RUST", "1" if native else "0")
     litellm.cache = Cache() if legacy else _v2.Cache.memory()
     litellm.cache.mode = CacheMode.default_off
     recording_server.expected_requests = 4
@@ -520,10 +511,9 @@ async def test_rust_messages_legacy_semantic_cache_preserves_python_scope(
 @pytest.mark.parametrize("rust_first", (False, True), ids=("python_to_rust", "rust_to_python"))
 @pytest.mark.parametrize("stream", (False, True), ids=("response", "stream"))
 async def test_legacy_cache_keeps_public_messages_responses_compatible(
-    recording_server: RecordingServer, monkeypatch: pytest.MonkeyPatch, rust_first: bool, stream: bool
+    recording_server: RecordingServer, rust_first: bool, stream: bool
 ) -> None:
     litellm.cache = Cache()
-    monkeypatch.setenv("LITELLM_RUST", "0")
     options: Final = {"litellm_params": {"preset_cache_key": "shared-messages"}, "stream": stream}
     first: Final = await invoke("messages", recording_server, options, native=rust_first)
     first_payload: Final = await collect(first) if stream else payload(first)
